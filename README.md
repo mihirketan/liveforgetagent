@@ -1,34 +1,39 @@
 # LiveForget Agent
-Voice/text agent where "forget everything I said" is enforced **in application code** before anything reaches the LLM.
 
-## Why prompts aren't enough
-A "please forget" prompt still ships the old text to the model (and logs). Here the Privacy Gate removes it first.
+A privacy-first text chat UI. Reset phrases are detected in the browser before the
+message is added to conversation context or sent to the configured LLM proxy.
 
-## Architecture
-```mermaid
-flowchart LR
- Mic-->STT[Streaming STT]-->Gate[Privacy Gate / reset detector]-->Epoch[Context Epoch Manager]-->Store[Conversation Store]-->LLM[LLM Request Manager]-->UI
- Text[Typed input]-->Gate
-```
-- `src/privacy/resetDetector.ts` – word-level phrase registry (normalised, longest-match, earliest-start).
-- `src/context/engine.ts` – gate + epoch + store. Every event carries `epoch`; stale STT events, LLM tokens, tool calls are rejected (`OLD_EVENT_REJECTED`). `resetContext()` bumps the epoch, aborts the LLM `AbortController`, clears store/queues. `ask()` asserts all messages share the current epoch or refuses to send.
-- Voice and typed input call the same `engine.ingest()`.
-- Streaming: a rolling word buffer (committed + interim) is rescanned on every event, so phrases split across events are caught. After a reset, `consumed` skips the pre-reset words of the still-growing interim result. Glue words ("before", "and", "then") right after the phrase are dropped.
+## Privacy behavior
 
-## Limitations
-- Transcript is normalised (lowercase, no punctuation). No word timestamps are used; if an STT engine *rewrites earlier words* of an interim after a reset, offsets can misalign. A reset is irreversible even if later interim revisions drop the phrase.
-- "forget that" / "start over" are broad and may trigger on ordinary speech; edit `RESET_PHRASES`.
-- **Cloud STT:** the app deletes *application context*; it cannot delete audio/text a third-party STT provider already received (**provider-side deletion** depends on their retention policy). For the strongest privacy use a local STT adapter.
-- Implemented STT adapter: Web Speech (Chrome/Edge/Safari; Chrome sends audio to Google). AssemblyAI, generic WebSocket and local Whisper are interface slots only (factory throws).
-- The LLM call is non-streaming plain text through the proxy.
+- “Forget everything I said,” “forget everything,” “forget that,” and “start over”
+  clear the in-memory conversation. The entire message containing a reset phrase
+  is discarded and is not sent.
+- Clearing the conversation aborts an in-flight request and prevents its late
+  response from being added to the new conversation.
+- Ordinary messages are sent only when `VITE_PROXY_URL` is configured. The
+  browser keeps conversation state in memory; it does not persist a transcript.
+- Resetting client context cannot delete messages already received or logged by
+  an LLM proxy or provider. Review their retention policies before sending
+  sensitive information.
+
+Reset matching is case-insensitive and ignores punctuation between words. Voice
+input and speech-to-text are not implemented.
 
 ## Run
-`npm install` · `npm run dev` · `npm run test` · `npm run build` · `npm run deploy` (gh-pages branch) or push to `main` (Actions workflow).
 
-## Connecting things
-1. **Edge proxy:** `cd worker`, create a Cloudflare Worker from `index.ts`; `wrangler secret put ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `ASSEMBLYAI_API_KEY`; set var `ALLOWED_ORIGIN=https://<user>.github.io`.
-2. **Claude / OpenAI:** `provider` is sent by `ProxyLLM` (`'anthropic'` default, `'openai'`).
-3. **AssemblyAI:** `/assemblyai-token` mints a short-lived token; write an adapter that streams 16 kHz PCM to AssemblyAI's v3 websocket and implements `SpeechProvider`.
-4. **Frontend config:** repo variable `VITE_PROXY_URL` (Settings → Variables); locally copy `.env.example` to `.env.local`. Never commit keys.
-5. **GitHub Pages:** Settings → Pages → Source: GitHub Actions. Set `base` in `vite.config.ts` if needed (currently relative).
-6. **Microphone:** needs HTTPS (Pages is) and an explicit click on Start Listening; denial shows an error.
+```sh
+npm ci
+npm run dev
+npm run test
+npm run build
+```
+
+To connect a proxy, copy `.env.example` to `.env.local` and set
+`VITE_PROXY_URL` to its HTTPS endpoint. The app sends a JSON `POST` with
+`{ "provider": "anthropic", "messages": [...] }` and expects a JSON response
+containing a string `text` or `content` field. The proxy must allow requests
+from the app's origin and keep provider API keys server-side. No proxy
+implementation is included in this repository.
+
+For GitHub Pages deployment, enable GitHub Actions as the Pages source and set
+the Vite `base` in `vite.config.ts` if the site is hosted below the domain root.
